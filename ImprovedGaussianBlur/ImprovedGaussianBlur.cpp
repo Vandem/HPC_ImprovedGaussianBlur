@@ -158,12 +158,19 @@ int main(int argc, char** argv)
 	int32_t height = img.rows;
 	size_t dataSizeImg = width * height * 3 * sizeof(unsigned char);
 
-	int32_t radius = 9;
+	int32_t radius = 14;
 	int32_t diameter = 2 * radius + 1;
 	float sigma = 1.0f;
 
 	float* gaussKernel = generateKernel(diameter, sigma);
 	size_t dataSizeKernel = sizeof(float) * diameter * diameter;
+
+	float* gaussKernel1D(new float[diameter]);
+
+	for (int i = 0; i < diameter; i++)
+	{
+		gaussKernel1D[i] = gaussKernel[i + diameter * radius];
+	}
 
 	// used for checking error status of api calls
 	cl_int status;
@@ -206,13 +213,13 @@ int main(int argc, char** argv)
 
 	cl_mem bufferImageIn = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSizeImg, NULL, &status);
 	checkStatus(status);
-	cl_mem bufferGaussKernel = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSizeKernel, NULL, &status);
+	cl_mem bufferGaussKernel = clCreateBuffer(context, CL_MEM_READ_ONLY, diameter, NULL, &status);
 	checkStatus(status);
 	cl_mem bufferImageOut = clCreateBuffer(context, CL_MEM_WRITE_ONLY, dataSizeImg, NULL, &status);
 	checkStatus(status);
 
 	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferImageIn, CL_TRUE, 0, dataSizeImg, img.data, 0, NULL, NULL));
-	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferGaussKernel, CL_TRUE, 0, dataSizeKernel, gaussKernel, 0, NULL, NULL));
+	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferGaussKernel, CL_TRUE, 0, diameter, gaussKernel1D, 0, NULL, NULL));
 
 	// read the kernel source
 	const char* kernelFileName = "kernel.cl";
@@ -240,9 +247,10 @@ int main(int argc, char** argv)
 	}
 
 	// create the vector addition kernel
-	//cl_kernel kernel = clCreateKernel(program, "vector_add", &status);
 	cl_kernel kernel = clCreateKernel(program, "calculate_pixel", &status);
 	checkStatus(status);
+
+	int orientation = 1;
 
 	// set the kernel arguments
 	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufferImageIn));
@@ -250,12 +258,23 @@ int main(int argc, char** argv)
 	checkStatus(clSetKernelArg(kernel, 2, sizeof(radius), &radius));
 	checkStatus(clSetKernelArg(kernel, 3, sizeof(width), &width));
 	checkStatus(clSetKernelArg(kernel, 4, sizeof(height), &height));
-	checkStatus(clSetKernelArg(kernel, 5, sizeof(cl_mem), &bufferImageOut));
+	checkStatus(clSetKernelArg(kernel, 5, sizeof(orientation), &orientation));
+	checkStatus(clSetKernelArg(kernel, 6, sizeof(cl_mem), &bufferImageOut));
+	checkStatus(clSetKernelArg(kernel, 7, width * 3, NULL));
 
 	// output device capabilities
 	size_t maxWorkGroupSize;
 	checkStatus(clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &maxWorkGroupSize, NULL));
 	printf("Device Capabilities: Max work items in single group: %zu\n", maxWorkGroupSize);
+	
+	if (width > maxWorkGroupSize || height > maxWorkGroupSize) {
+		printf("image dimensions exceed work group size.");
+		exit(EXIT_FAILURE);
+	}
+
+	size_t maxKernelWorkGroupSize;
+	checkStatus(clGetKernelWorkGroupInfo(kernel, device, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), &maxKernelWorkGroupSize, NULL));
+	printf("CL_KERNEL_WORK_GROUP_SIZE: %zu\n", maxKernelWorkGroupSize);
 
 	cl_uint maxWorkItemDimensions;
 	checkStatus(clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS, sizeof(cl_uint), &maxWorkItemDimensions, NULL));
@@ -272,15 +291,42 @@ int main(int argc, char** argv)
 	// execute the kernel
 	// ndrange capabilites only need to be checked when we specify a local work group size manually
 	// in our case we provide NULL as local work group size, which means groups get formed automatically
-	size_t globalWorkSize[2] = { width, height };
-	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 2, NULL, globalWorkSize, NULL, 0, NULL, NULL));
+	size_t globalWorkSize[1] = { width * height };
+	size_t localWorkSize[1] = { width };
+
+	cl_event fistPassEvent;
+	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 1, NULL, globalWorkSize, localWorkSize, 0, NULL, &fistPassEvent));
+
+	clWaitForEvents(1, &fistPassEvent);
+
+	cl_event readFirstPassEvent;
+	// read the device output buffer to the host output array
+	checkStatus(clEnqueueReadBuffer(commandQueue, bufferImageOut, CL_TRUE, 0, dataSizeImg, out.data, 0, NULL, &readFirstPassEvent));
+	clWaitForEvents(1, &readFirstPassEvent);
+	imshow("out first", out);
+
+	// ----------------------------------- 2nd Pass ------------------------------------
+
+	orientation = 0;
+
+	cl_mem bufferImageSecondPass = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSizeImg, NULL, &status);
+	checkStatus(status);
+
+	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferImageSecondPass, CL_TRUE, 0, dataSizeImg, out.data, 0, NULL, NULL));
+
+	// set the kernel arguments
+	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufferImageSecondPass));
+	checkStatus(clSetKernelArg(kernel, 5, sizeof(orientation), &orientation));
+	checkStatus(clSetKernelArg(kernel, 7, height * 3, NULL));
+	localWorkSize[0] = height;
+	checkStatus(clEnqueueNDRangeKernel(commandQueue, kernel, 1, NULL, globalWorkSize, localWorkSize, 0, NULL, NULL));
 
 	// read the device output buffer to the host output array
 	checkStatus(clEnqueueReadBuffer(commandQueue, bufferImageOut, CL_TRUE, 0, dataSizeImg, out.data, 0, NULL, NULL));
 
 	// output result
 	imshow("img", img);
-	imshow("out", out);
+	imshow("out second", out);
 
 	// release opencl objects
 	checkStatus(clReleaseKernel(kernel));
