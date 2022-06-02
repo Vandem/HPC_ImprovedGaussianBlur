@@ -158,17 +158,17 @@ int main(int argc, char** argv)
 	int32_t height = img.rows;
 	size_t dataSizeImg = width * height * 3 * sizeof(unsigned char);
 
-	int32_t radius = 14;
+	int32_t radius = 9;
 	int32_t diameter = 2 * radius + 1;
-	float sigma = 1.0f;
+	float sigma = 10.0f;
 
 	float* gaussKernel = generateKernel(diameter, sigma);
-	size_t dataSizeKernel = sizeof(float) * diameter * diameter;
-
 	float* gaussKernel1D(new float[diameter]);
+	size_t dataSizeKernel1D = sizeof(float) * diameter;
 
 	for (int i = 0; i < diameter; i++)
 	{
+		// retrieve the kernel's middle row
 		gaussKernel1D[i] = gaussKernel[i + diameter * radius];
 	}
 
@@ -192,6 +192,7 @@ int main(int argc, char** argv)
 	// retrieve the number of devices
 	cl_uint numDevices = 0;
 	checkStatus(clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 0, NULL, &numDevices));
+	printf("number of devices: %d \n", numDevices);
 
 	if (numDevices == 0)
 	{
@@ -213,13 +214,13 @@ int main(int argc, char** argv)
 
 	cl_mem bufferImageIn = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSizeImg, NULL, &status);
 	checkStatus(status);
-	cl_mem bufferGaussKernel = clCreateBuffer(context, CL_MEM_READ_ONLY, diameter, NULL, &status);
+	cl_mem bufferGaussKernel = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSizeKernel1D, NULL, &status);
 	checkStatus(status);
 	cl_mem bufferImageOut = clCreateBuffer(context, CL_MEM_WRITE_ONLY, dataSizeImg, NULL, &status);
 	checkStatus(status);
 
 	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferImageIn, CL_TRUE, 0, dataSizeImg, img.data, 0, NULL, NULL));
-	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferGaussKernel, CL_TRUE, 0, diameter, gaussKernel1D, 0, NULL, NULL));
+	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferGaussKernel, CL_TRUE, 0, dataSizeKernel1D, gaussKernel1D, 0, NULL, NULL));
 
 	// read the kernel source
 	const char* kernelFileName = "kernel.cl";
@@ -303,17 +304,17 @@ int main(int argc, char** argv)
 	// read the device output buffer to the host output array
 	checkStatus(clEnqueueReadBuffer(commandQueue, bufferImageOut, CL_TRUE, 0, dataSizeImg, out.data, 0, NULL, &readFirstPassEvent));
 	clWaitForEvents(1, &readFirstPassEvent);
-	imshow("out first", out);
+	imshow("out first pass", out);
 
 	// ----------------------------------- 2nd Pass ------------------------------------
 
-	orientation = 0;
 
 	cl_mem bufferImageSecondPass = clCreateBuffer(context, CL_MEM_READ_ONLY, dataSizeImg, NULL, &status);
 	checkStatus(status);
 
 	checkStatus(clEnqueueWriteBuffer(commandQueue, bufferImageSecondPass, CL_TRUE, 0, dataSizeImg, out.data, 0, NULL, NULL));
 
+	orientation = 0;
 	// set the kernel arguments
 	checkStatus(clSetKernelArg(kernel, 0, sizeof(cl_mem), &bufferImageSecondPass));
 	checkStatus(clSetKernelArg(kernel, 5, sizeof(orientation), &orientation));
@@ -326,11 +327,19 @@ int main(int argc, char** argv)
 
 	// output result
 	imshow("img", img);
-	imshow("out second", out);
+	imshow("out second pass", out);
+
+	// release allocated resources
+	free(gaussKernel);
+	delete[] gaussKernel1D;
 
 	// release opencl objects
 	checkStatus(clReleaseKernel(kernel));
 	checkStatus(clReleaseProgram(program));
+	checkStatus(clReleaseMemObject(bufferImageIn));
+	checkStatus(clReleaseMemObject(bufferImageOut));
+	checkStatus(clReleaseMemObject(bufferImageSecondPass));
+	checkStatus(clReleaseMemObject(bufferGaussKernel));
 	checkStatus(clReleaseCommandQueue(commandQueue));
 	checkStatus(clReleaseContext(context));
 

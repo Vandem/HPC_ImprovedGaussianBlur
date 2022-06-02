@@ -8,17 +8,8 @@ __kernel void calculate_pixel(
 	__global unsigned char* ImgOut,
 	__local unsigned char* partition)
 {
-	int globalId = get_global_id(0);
 	int pixel = get_local_id(0);
 	int workGroupId = get_group_id(0);
-	int workGroupSize = get_num_groups(0);
-
-	int diameter = radius * 2 + 1;
-
-	if (globalId == 0) {
-		printf("radius: %d \n", radius);
-		printf("diameter: %d \n", diameter);
-	}
 
 	// col-wise
 	int row = pixel;
@@ -30,16 +21,9 @@ __kernel void calculate_pixel(
 		col = pixel;
 		limit = width;
 	}
-	if (pixel == 0)
-	{
-		for (int i = 0; i < limit; i++) {
-			for (int c = 0; c < 3; c++) {
-			if (orientation == 1) // row-wise
-				partition[i * 3 + c] = ImgIn[3 * row * width + 3 * i + c];
-			else // col-wise
-				partition[i * 3 + c] = ImgIn[3 * i * width + 3 * col + c];
-			}
-		}
+
+	for (int c = 0; c < 3; c++) {
+		partition[pixel * 3 + c] = ImgIn[3 * row * width + 3 * col + c];
 	}
 
 	barrier(CLK_LOCAL_MEM_FENCE);
@@ -48,19 +32,23 @@ __kernel void calculate_pixel(
 	{
 		float sum = 0;
 		float sumKernel = 0;
+		int kernelPixel = 0;
 
 		for (int x = -radius; x <= radius; x++)
 		{
 			float kernelValue = GaussKernel[x + radius];
 
-			int currentPixel = pixel;
-
-			if ((pixel + x) >= 0 && (pixel + x) < limit)
-			{
-				currentPixel += x;
+			if ((pixel + x) < 0) {
+				kernelPixel = 0;
 			}
+			else if ((pixel + x) >= limit) {
+				kernelPixel = limit - 1;
+			}
+			else {
+				kernelPixel = pixel + x;
+			}
+			float color = partition[kernelPixel * 3 + c];
 
-			float color = partition[currentPixel * 3 + c];
 			sum += color * kernelValue;
 			sumKernel += kernelValue;
 		}
